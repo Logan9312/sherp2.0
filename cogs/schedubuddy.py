@@ -102,7 +102,7 @@ class ScheduleSession:
 
     def build_embed(self, display_name, schedule) -> Embed:
         embed = Embed(
-            description=f"Listing **{self.current_page+1}**\
+            description=f"Listing **{self.current_page + 1}**\
             of **{len(self.pages)}** pages",
             color=0xB3EDBD,
         )
