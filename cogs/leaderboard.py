@@ -1,8 +1,6 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json
-import os
 from typing import Dict, List, Tuple, Optional
 import asyncio
 
@@ -90,98 +88,65 @@ class LeaderboardView(discord.ui.View):
 class Leaderboard(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.message_counts_file = "data/message_counts.json"
-        self.message_counts: Dict[str, Dict[str, int]] = {}
-        self.save_lock = asyncio.Lock()
         
     async def cog_load(self):
-        """Load message counts from file when cog loads"""
+        """Load when cog loads"""
         await super().cog_load()
-        await self.load_message_counts()
         print("Leaderboard Cog loaded.")
-        
-    async def load_message_counts(self):
-        """Load message counts from JSON file"""
-        if os.path.exists(self.message_counts_file):
-            try:
-                with open(self.message_counts_file, 'r') as f:
-                    self.message_counts = json.load(f)
-            except:
-                self.message_counts = {}
-        else:
-            self.message_counts = {}
     
-    async def save_message_counts(self):
-        """Save message counts to JSON file"""
-        async with self.save_lock:
-            with open(self.message_counts_file, 'w') as f:
-                json.dump(self.message_counts, f, indent=2)
-    
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """Track message counts for users"""
-        # Ignore bot messages and DMs
-        if message.author.bot or not message.guild:
-            return
-        
-        guild_id = str(message.guild.id)
-        user_id = str(message.author.id)
-        
-        # Initialize guild data if not exists
-        if guild_id not in self.message_counts:
-            self.message_counts[guild_id] = {}
-        
-        # Increment message count
-        if user_id not in self.message_counts[guild_id]:
-            self.message_counts[guild_id][user_id] = 0
-        
-        self.message_counts[guild_id][user_id] += 1
-        
-        # Save every 10 messages to reduce I/O
-        total_messages = sum(self.message_counts[guild_id].values())
-        if total_messages % 10 == 0:
-            await self.save_message_counts()
-    
-    # Helper method to get leaderboard data
-    async def get_leaderboard_data(self, guild_id: str) -> Optional[List[Tuple[str, int]]]:
-        """Get sorted leaderboard data for a guild"""
-        if guild_id not in self.message_counts or not self.message_counts[guild_id]:
-            return None
-            
-        return sorted(
-            self.message_counts[guild_id].items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-    
-    # Helper method to get user message count and rank
-    async def get_user_stats(self, guild_id: str, user_id: str) -> Tuple[int, int]:
-        """Get message count and rank for a user"""
+    async def get_user_message_count(self, guild: discord.Guild, user: discord.Member) -> int:
+        """Get total message count for a user in a guild"""
         count = 0
-        rank = 0
+        # Search through all channels the user can see
+        for channel in guild.text_channels:
+            if channel.permissions_for(user).read_messages:
+                try:
+                    # Use search to get message count
+                    async for message in channel.history(limit=None):
+                        if message.author.id == user.id and not message.author.bot:
+                            count += 1
+                except discord.Forbidden:
+                    continue  # Skip channels we don't have access to
+                except discord.HTTPException:
+                    continue  # Skip if we hit rate limits
+        return count
+    
+    async def get_leaderboard_data(self, guild: discord.Guild, channel: discord.TextChannel) -> List[Tuple[str, int]]:
+        """Get sorted leaderboard data for a guild by fetching message counts"""
+        # Get all members in the guild
+        members = [m for m in guild.members if not m.bot]
         
-        if guild_id in self.message_counts and user_id in self.message_counts[guild_id]:
-            count = self.message_counts[guild_id][user_id]
-            
-            # Calculate rank
-            sorted_users = sorted(
-                self.message_counts[guild_id].items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-            
-            for i, (uid, _) in enumerate(sorted_users, 1):
-                if uid == user_id:
-                    rank = i
-                    break
-                    
-        return count, rank
+        # Create a loading embed
+        loading_embed = discord.Embed(
+            title="📊 Message Leaderboard",
+            description="Fetching message counts for all users... This may take a while.",
+            color=discord.Color.gold()
+        )
+        
+        # Send loading message to the command channel
+        loading_msg = await channel.send(embed=loading_embed)
+        
+        # Get message counts for all members
+        message_counts = []
+        for member in members:
+            count = await self.get_user_message_count(guild, member)
+            if count > 0:  # Only include users with messages
+                message_counts.append((str(member.id), count))
+        
+        # Delete loading message
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        # Sort by message count
+        return sorted(message_counts, key=lambda x: x[1], reverse=True)
     
     # Prefix command for leaderboard
     @commands.command(name="leaderboard", aliases=["lb", "top"])
     async def leaderboard_prefix(self, ctx: commands.Context):
         """Display the message count leaderboard for this server"""
-        await self.show_leaderboard(ctx, ctx.guild.id)
+        await self.show_leaderboard(ctx, ctx.guild, ctx.channel)
     
     # Slash command for leaderboard
     @app_commands.command(
@@ -190,20 +155,18 @@ class Leaderboard(commands.Cog):
     )
     async def leaderboard_slash(self, interaction: discord.Interaction):
         """Slash command to display the message count leaderboard"""
-        await self.show_leaderboard(interaction, interaction.guild_id)
+        await self.show_leaderboard(interaction, interaction.guild, interaction.channel)
     
     # Common method for both prefix and slash commands
-    async def show_leaderboard(self, ctx_or_interaction, guild_id: int):
+    async def show_leaderboard(self, ctx_or_interaction, guild: discord.Guild, channel: discord.TextChannel):
         """Display the leaderboard for a guild"""
-        guild_id_str = str(guild_id)
-        
         # Get message counts for this guild
-        sorted_users = await self.get_leaderboard_data(guild_id_str)
+        sorted_users = await self.get_leaderboard_data(guild, channel)
         
         if not sorted_users:
             embed = discord.Embed(
                 title="📊 Message Leaderboard",
-                description="No message data available yet. Start chatting!",
+                description="No message data available.",
                 color=discord.Color.gold()
             )
             if isinstance(ctx_or_interaction, discord.Interaction):
@@ -229,7 +192,7 @@ class Leaderboard(commands.Cog):
         if member is None:
             member = ctx.author
         
-        await self.show_message_count(ctx, ctx.guild.id, member)
+        await self.show_message_count(ctx, ctx.guild, member)
     
     # Slash command for message count
     @app_commands.command(
@@ -248,17 +211,34 @@ class Leaderboard(commands.Cog):
         if member is None:
             member = interaction.user
         
-        await self.show_message_count(interaction, interaction.guild_id, member)
+        await self.show_message_count(interaction, interaction.guild, member)
     
     # Common method for both prefix and slash commands
-    async def show_message_count(self, ctx_or_interaction, guild_id: int, member: discord.Member):
+    async def show_message_count(self, ctx_or_interaction, guild: discord.Guild, member: discord.Member):
         """Display message count for a member"""
-        guild_id_str = str(guild_id)
-        user_id_str = str(member.id)
+        # Send loading message
+        loading_embed = discord.Embed(
+            title="📈 Message Count",
+            description=f"Fetching message count for {member.display_name}...",
+            color=member.color
+        )
+        if isinstance(ctx_or_interaction, discord.Interaction):
+            await ctx_or_interaction.response.send_message(embed=loading_embed)
+        else:
+            loading_msg = await ctx_or_interaction.send(embed=loading_embed)
         
-        # Get message count and rank
-        count, rank = await self.get_user_stats(guild_id_str, user_id_str)
+        # Get message count
+        count = await self.get_user_message_count(guild, member)
         
+        # Get rank by fetching all counts
+        all_counts = await self.get_leaderboard_data(guild, ctx_or_interaction.channel)
+        rank = 0
+        for i, (uid, _) in enumerate(all_counts, 1):
+            if uid == str(member.id):
+                rank = i
+                break
+        
+        # Create final embed
         embed = discord.Embed(
             title="📈 Message Count",
             color=member.color
@@ -269,41 +249,11 @@ class Leaderboard(commands.Cog):
         if rank > 0:
             embed.add_field(name="Rank", value=f"**#{rank}**", inline=True)
         
+        # Update or send final message
         if isinstance(ctx_or_interaction, discord.Interaction):
-            await ctx_or_interaction.response.send_message(embed=embed)
+            await ctx_or_interaction.edit_original_response(embed=embed)
         else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    # Prefix command for reset leaderboard
-    @commands.command(name="resetleaderboard", hidden=True)
-    @commands.has_permissions(administrator=True)
-    async def reset_leaderboard_prefix(self, ctx: commands.Context):
-        """Reset the leaderboard for this server (Admin only)"""
-        await self.reset_leaderboard(ctx, ctx.guild.id)
-    
-    # Slash command for reset leaderboard
-    @app_commands.command(
-        name="resetleaderboard",
-        description="Reset the message leaderboard for this server (Admin only)"
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def reset_leaderboard_slash(self, interaction: discord.Interaction):
-        """Slash command to reset the leaderboard"""
-        await self.reset_leaderboard(interaction, interaction.guild_id)
-    
-    # Common method for both prefix and slash commands
-    async def reset_leaderboard(self, ctx_or_interaction, guild_id: int):
-        """Reset the leaderboard for a guild"""
-        guild_id_str = str(guild_id)
-        
-        if guild_id_str in self.message_counts:
-            self.message_counts[guild_id_str] = {}
-            await self.save_message_counts()
-            
-        if isinstance(ctx_or_interaction, discord.Interaction):
-            await ctx_or_interaction.response.send_message("✅ Leaderboard has been reset for this server.")
-        else:
-            await ctx_or_interaction.send("✅ Leaderboard has been reset for this server.")
+            await loading_msg.edit(embed=embed)
 
 
 async def setup_leaderboard(bot, guilds):
