@@ -95,9 +95,41 @@ class Leaderboard(commands.Cog):
         await super().cog_load()
         print("Leaderboard Cog loaded.")
     
-    async def get_user_message_count(self, guild: discord.Guild, user: discord.Member, progress_callback=None) -> int:
+    async def count_channel_messages(self, channel, user, after_date=None, completed_callback=None) -> int:
+        """Count messages for a user in a single channel"""
+        try:
+            channel_count = 0
+            # Use after parameter if provided for faster processing
+            history_kwargs = {"limit": None}
+            if after_date:
+                history_kwargs["after"] = after_date
+                
+            async for message in channel.history(**history_kwargs):
+                if message.author.id == user.id and not message.author.bot:
+                    channel_count += 1
+            
+            if channel_count > 0:
+                print(f"Channel {channel.name}: {channel_count} messages")
+            
+            # Call completed callback if provided
+            if completed_callback:
+                await completed_callback()
+                
+            return channel_count
+                
+        except discord.Forbidden:
+            print(f"No access to channel: {channel.name}")
+            if completed_callback:
+                await completed_callback()
+            return 0
+        except discord.HTTPException as e:
+            print(f"HTTP error in {channel.name}: {str(e)}")
+            if completed_callback:
+                await completed_callback()
+            return 0
+    
+    async def get_user_message_count(self, guild: discord.Guild, user: discord.Member, progress_callback=None, after_date=None, channel_completed_callback=None) -> int:
         """Get total message count for a user in a guild using filtered history"""
-        count = 0
         # Get all channels that can contain messages
         channels = [
             channel for channel in guild.channels 
@@ -121,92 +153,54 @@ class Leaderboard(commands.Cog):
             if forum.permissions_for(guild.me).read_messages:
                 accessible_forums.append(forum)
         
-        total_accessible = len(accessible_channels) + len(accessible_forums)
-        channels_processed = 0
-        
-        # Debug info
-        print(f"\nCounting messages for {user.name} in {guild.name}")
-        print(f"Total channels to check: {len(channels)} text channels/threads, {len(forum_channels)} forums")
-        print(f"Accessible channels: {len(accessible_channels)} text channels/threads, {len(accessible_forums)} forums")
-        
-        # Search through all accessible channels
-        for channel in accessible_channels:
-            try:
-                channel_count = 0
-                # Use history and filter messages manually
-                async for message in channel.history(
-                    limit=None
-                    # Removed time limit to count all messages
-                ):
-                    if message.author.id == user.id and not message.author.bot:
-                        channel_count += 1
-                
-                if channel_count > 0:
-                    print(f"Channel {channel.name}: {channel_count} messages")
-                    count += channel_count
-                    
-            except discord.Forbidden:
-                print(f"No access to channel: {channel.name}")
-                continue  # Skip channels we don't have access to
-            except discord.HTTPException as e:
-                print(f"HTTP error in {channel.name}: {str(e)}")
-                continue  # Skip if we hit rate limits
-            
-            # Update channel progress
-            channels_processed += 1
-            if progress_callback and total_accessible > 0:
-                await progress_callback(channels_processed, total_accessible)
-        
-        # Handle accessible forum channels
+        # Collect all threads from forums
+        all_threads = []
         for forum in accessible_forums:
             try:
-                # Get all threads (both active and archived)
-                all_threads = []
-                
                 # Get active threads
                 for thread in forum.threads:
-                    all_threads.append(thread)
+                    if thread.permissions_for(guild.me).read_messages:
+                        all_threads.append(thread)
                 
                 # Get archived threads
                 async for thread in forum.archived_threads(limit=None):
-                    all_threads.append(thread)
-                
-                # Process all threads
-                for thread in all_threads:
-                    try:
-                        thread_count = 0
-                        async for message in thread.history(
-                            limit=None
-                            # Removed time limit to count all messages
-                        ):
-                            if message.author.id == user.id and not message.author.bot:
-                                thread_count += 1
-                        
-                        if thread_count > 0:
-                            print(f"Thread {thread.name} in {forum.name}: {thread_count} messages")
-                            count += thread_count
-                            
-                    except discord.Forbidden:
-                        print(f"No access to thread: {thread.name}")
-                        continue
-                    except discord.HTTPException as e:
-                        print(f"HTTP error in thread {thread.name}: {str(e)}")
-                        continue
-                            
-            except discord.Forbidden:
-                print(f"No access to forum: {forum.name}")
+                    if thread.permissions_for(guild.me).read_messages:
+                        all_threads.append(thread)
+            except:
                 continue
-            except discord.HTTPException as e:
-                print(f"HTTP error in forum {forum.name}: {str(e)}")
-                continue
-            
-            # Update channel progress for forum
-            channels_processed += 1
-            if progress_callback and total_accessible > 0:
-                await progress_callback(channels_processed, total_accessible)
         
-        print(f"Total count for {user.name}: {count} messages\n")
-        return count
+        # Combine all channels and threads
+        all_channels = accessible_channels + all_threads
+        total_channels = len(all_channels)
+        
+        # Debug info
+        print(f"\nCounting messages for {user.name} in {guild.name}")
+        print(f"Total channels to check: {len(accessible_channels)} text channels, {len(all_threads)} threads")
+        
+        if total_channels == 0:
+            return 0
+        
+        # Process channels in batches for better performance
+        batch_size = 10  # Process 10 channels at a time
+        total_count = 0
+        channels_processed = 0
+        
+        for i in range(0, total_channels, batch_size):
+            batch = all_channels[i:i + batch_size]
+            
+            # Count messages in parallel for this batch
+            tasks = [self.count_channel_messages(channel, user, after_date, channel_completed_callback) for channel in batch]
+            counts = await asyncio.gather(*tasks)
+            
+            total_count += sum(counts)
+            channels_processed += len(batch)
+            
+            # Update progress
+            if progress_callback:
+                await progress_callback(channels_processed, total_channels)
+        
+        print(f"Total count for {user.name}: {total_count} messages\n")
+        return total_count
     
     async def get_leaderboard_data(self, guild: discord.Guild, channel: discord.TextChannel) -> List[Tuple[str, int]]:
         """Get sorted leaderboard data for a guild by fetching message counts"""
@@ -214,74 +208,126 @@ class Leaderboard(commands.Cog):
         members = [m for m in guild.members if not m.bot]
         total_users = len(members)
         
+        # Get accurate total channels for progress tracking
+        # Count text channels and threads
+        text_channels = [
+            ch for ch in guild.channels 
+            if isinstance(ch, discord.TextChannel)
+            and ch.permissions_for(guild.me).read_messages
+        ]
+        
+        # Count existing threads
+        existing_threads = [
+            ch for ch in guild.channels 
+            if isinstance(ch, discord.Thread)
+            and ch.permissions_for(guild.me).read_messages
+        ]
+        
+        # Count forum channels and estimate their threads
+        forum_channels = [
+            ch for ch in guild.channels 
+            if isinstance(ch, discord.ForumChannel)
+            and ch.permissions_for(guild.me).read_messages
+        ]
+        
+        # Get actual thread count from forums
+        forum_thread_count = 0
+        for forum in forum_channels:
+            try:
+                # Count active threads
+                forum_thread_count += len(forum.threads)
+                # Note: We can't easily count archived threads without fetching them
+                # so we'll estimate based on active threads
+                forum_thread_count += len(forum.threads) * 2  # Estimate archived threads
+            except:
+                forum_thread_count += 10  # Default estimate per forum
+        
+        total_channels_estimate = len(text_channels) + len(existing_threads) + forum_thread_count
+        
+        # Calculate total work units (users × channels)
+        total_work_units = total_users * total_channels_estimate
+        completed_work_units = 0
+        
         # Create a loading embed
         loading_embed = discord.Embed(
             title="📊 Message Leaderboard",
-            description="Fetching message counts for all users... This may take a while.",
+            description=f"Fetching message counts for all users...\nEstimated channels per user: ~{total_channels_estimate}",
             color=discord.Color.gold()
         )
-        loading_embed.add_field(name="Users Progress", value="0%", inline=True)
-        loading_embed.add_field(name="Current User", value="Starting...", inline=True)
-        loading_embed.add_field(name="Channel Progress", value="0%", inline=True)
+        loading_embed.add_field(name="Overall Progress", value="0%", inline=True)
+        loading_embed.add_field(name="Users Completed", value="0 / " + str(total_users), inline=True)
+        loading_embed.add_field(name="Processing", value="Starting...", inline=True)
         
         # Send loading message to the command channel
         loading_msg = await channel.send(embed=loading_embed)
         
         # Track progress
-        last_user_percent = 0
-        last_channel_percent = 0
-        current_channel_progress = (0, 0)
+        completed_users = 0
+        work_lock = asyncio.Lock()
         
-        async def update_channel_progress(channels_done, total_channels):
-            nonlocal last_channel_percent, current_channel_progress
-            current_channel_progress = (channels_done, total_channels)
-            
-            if total_channels > 0:
-                channel_percent = int((channels_done / total_channels) * 100)
-                # Update only on 10% increments
-                if channel_percent >= last_channel_percent + 10:
-                    last_channel_percent = (channel_percent // 10) * 10
-                    await update_embed()
+        async def increment_work_units():
+            nonlocal completed_work_units
+            async with work_lock:
+                completed_work_units += 1
         
-        async def update_embed():
-            loading_embed.set_field_at(0, name="Users Progress", 
-                                     value=f"{last_user_percent}% ({users_processed}/{total_users})", 
+        async def update_progress_display():
+            progress_percent = int((completed_work_units / total_work_units) * 100) if total_work_units > 0 else 0
+            loading_embed.set_field_at(0, name="Overall Progress", 
+                                     value=f"{progress_percent}%", 
                                      inline=True)
-            loading_embed.set_field_at(1, name="Current User", 
-                                     value=current_user_name, 
+            loading_embed.set_field_at(1, name="Users Completed", 
+                                     value=f"{completed_users} / {total_users}", 
                                      inline=True)
-            if current_channel_progress[1] > 0:
-                channel_pct = int((current_channel_progress[0] / current_channel_progress[1]) * 100)
-                loading_embed.set_field_at(2, name="Channel Progress", 
-                                         value=f"{channel_pct}% ({current_channel_progress[0]}/{current_channel_progress[1]})", 
-                                         inline=True)
             try:
                 await loading_msg.edit(embed=loading_embed)
             except:
                 pass
         
+        # Process users in parallel batches
+        async def process_user(member):
+            """Process a single user and return their count"""
+            nonlocal completed_users
+            count = await self.get_user_message_count(guild, member, None, None, increment_work_units)
+            
+            # Increment completed users
+            async with work_lock:
+                completed_users += 1
+                
+            # Update display periodically (every 5 users)
+            if completed_users % 5 == 0:
+                await update_progress_display()
+                
+            if count > 0:
+                return (str(member.id), count)
+            return None
+        
         # Get message counts for all members
         message_counts = []
-        users_processed = 0
-        current_user_name = "Starting..."
+        user_batch_size = 50  # Process 50 users at a time
         
-        for i, member in enumerate(members):
-            current_user_name = member.display_name
-            users_processed = i + 1
+        for i in range(0, total_users, user_batch_size):
+            batch = members[i:i + user_batch_size]
             
-            # Update user progress every 10%
-            if total_users > 0:
-                user_percent = int((users_processed / total_users) * 100)
-                if user_percent >= last_user_percent + 10:
-                    last_user_percent = (user_percent // 10) * 10
-                    await update_embed()
+            # Update which batch is being processed
+            loading_embed.set_field_at(2, name="Processing", 
+                                     value=f"Batch {i//user_batch_size + 1} of {(total_users + user_batch_size - 1)//user_batch_size} ({len(batch)} users)", 
+                                     inline=True)
+            try:
+                await loading_msg.edit(embed=loading_embed)
+            except:
+                pass
             
-            # Reset channel progress for new user
-            current_channel_progress = (0, 0)
+            # Process users in parallel
+            tasks = [process_user(member) for member in batch]
+            results = await asyncio.gather(*tasks)
             
-            count = await self.get_user_message_count(guild, member, update_channel_progress)
-            if count > 0:  # Only include users with messages
-                message_counts.append((str(member.id), count))
+            # Add non-None results
+            for result in results:
+                if result:
+                    message_counts.append(result)
+            
+            # Update progress after batch
+            await update_progress_display()
         
         # Update to show we're finalizing
         try:
@@ -391,7 +437,7 @@ class Leaderboard(commands.Cog):
             loading_msg = await ctx_or_interaction.send(embed=loading_embed)
         
         # Get message count
-        count = await self.get_user_message_count(guild, member, None)
+        count = await self.get_user_message_count(guild, member, None, None, None)
         
         # Get rank by fetching all counts
         all_counts = await self.get_leaderboard_data(guild, ctx_or_interaction.channel)
