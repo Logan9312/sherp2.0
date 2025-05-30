@@ -111,21 +111,30 @@ class Leaderboard(commands.Cog):
             if channel_count > 0:
                 print(f"Channel {channel.name}: {channel_count} messages")
             
-            # Call completed callback if provided
+            # Call completed callback if provided - do this BEFORE returning
             if completed_callback:
-                await completed_callback()
+                try:
+                    await completed_callback()
+                except Exception as e:
+                    print(f"Error in channel completion callback: {e}")
                 
             return channel_count
                 
         except discord.Forbidden:
             print(f"No access to channel: {channel.name}")
             if completed_callback:
-                await completed_callback()
+                try:
+                    await completed_callback()
+                except Exception as e:
+                    print(f"Error in channel completion callback: {e}")
             return 0
         except discord.HTTPException as e:
             print(f"HTTP error in {channel.name}: {str(e)}")
             if completed_callback:
-                await completed_callback()
+                try:
+                    await completed_callback()
+                except Exception as e:
+                    print(f"Error in channel completion callback: {e}")
             return 0
     
     async def get_user_message_count(self, guild: discord.Guild, user: discord.Member, progress_callback=None, after_date=None, channel_completed_callback=None) -> int:
@@ -181,7 +190,7 @@ class Leaderboard(commands.Cog):
             return 0
         
         # Process channels in batches for better performance
-        batch_size = 10  # Process 10 channels at a time
+        batch_size = 5  # Reduced batch size for more frequent updates
         total_count = 0
         channels_processed = 0
         
@@ -189,10 +198,20 @@ class Leaderboard(commands.Cog):
             batch = all_channels[i:i + batch_size]
             
             # Count messages in parallel for this batch
-            tasks = [self.count_channel_messages(channel, user, after_date, channel_completed_callback) for channel in batch]
-            counts = await asyncio.gather(*tasks)
+            tasks = []
+            for channel in batch:
+                # Create a task for each channel
+                task = asyncio.create_task(self.count_channel_messages(channel, user, after_date, channel_completed_callback))
+                tasks.append(task)
             
-            total_count += sum(counts)
+            # Wait for all tasks in this batch to complete
+            counts = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Sum up valid counts (handle any exceptions)
+            for count in counts:
+                if isinstance(count, int):
+                    total_count += count
+            
             channels_processed += len(batch)
             
             # Update progress
@@ -208,54 +227,51 @@ class Leaderboard(commands.Cog):
         members = [m for m in guild.members if not m.bot]
         total_users = len(members)
         
-        # Get accurate total channels for progress tracking
-        # Count text channels and threads
-        text_channels = [
-            ch for ch in guild.channels 
-            if isinstance(ch, discord.TextChannel)
-            and ch.permissions_for(guild.me).read_messages
-        ]
+        # Get ALL actual channels we'll process (no estimation)
+        all_channels_to_process = []
         
-        # Count existing threads
-        existing_threads = [
-            ch for ch in guild.channels 
-            if isinstance(ch, discord.Thread)
-            and ch.permissions_for(guild.me).read_messages
-        ]
+        # Add text channels and threads
+        for ch in guild.channels:
+            if isinstance(ch, (discord.TextChannel, discord.Thread)) and ch.permissions_for(guild.me).read_messages:
+                all_channels_to_process.append(ch)
         
-        # Count forum channels and estimate their threads
+        # Add forum threads
         forum_channels = [
             ch for ch in guild.channels 
             if isinstance(ch, discord.ForumChannel)
             and ch.permissions_for(guild.me).read_messages
         ]
         
-        # Get actual thread count from forums
-        forum_thread_count = 0
         for forum in forum_channels:
             try:
-                # Count active threads
-                forum_thread_count += len(forum.threads)
-                # Note: We can't easily count archived threads without fetching them
-                # so we'll estimate based on active threads
-                forum_thread_count += len(forum.threads) * 2  # Estimate archived threads
+                # Add active threads
+                for thread in forum.threads:
+                    if thread.permissions_for(guild.me).read_messages:
+                        all_channels_to_process.append(thread)
+                
+                # Add archived threads
+                async for thread in forum.archived_threads(limit=None):
+                    if thread.permissions_for(guild.me).read_messages:
+                        all_channels_to_process.append(thread)
             except:
-                forum_thread_count += 10  # Default estimate per forum
+                continue
         
-        total_channels_estimate = len(text_channels) + len(existing_threads) + forum_thread_count
+        # Now we have the EXACT count
+        total_channels_actual = len(all_channels_to_process)
         
         # Calculate total work units (users × channels)
-        total_work_units = total_users * total_channels_estimate
-        completed_work_units = 0
+        total_channels_to_process = total_channels_actual * total_users
+        channels_processed = 0
         
         # Create a loading embed
         loading_embed = discord.Embed(
             title="📊 Message Leaderboard",
-            description=f"Fetching message counts for all users...\nEstimated channels per user: ~{total_channels_estimate}",
+            description=f"Fetching message counts for all users...\nTotal channels to process: {total_channels_to_process}",
             color=discord.Color.gold()
         )
         loading_embed.add_field(name="Overall Progress", value="0%", inline=True)
         loading_embed.add_field(name="Users Completed", value="0 / " + str(total_users), inline=True)
+        loading_embed.add_field(name="Channels Processed", value="0 / " + str(total_channels_to_process), inline=True)
         loading_embed.add_field(name="Processing", value="Starting...", inline=True)
         
         # Send loading message to the command channel
@@ -264,26 +280,49 @@ class Leaderboard(commands.Cog):
         # Track progress
         completed_users = 0
         work_lock = asyncio.Lock()
+        last_update_time = 0
+        UPDATE_INTERVAL = 0.5  # Update display at most every 0.5 seconds
         
         async def increment_work_units():
-            nonlocal completed_work_units
+            nonlocal channels_processed, last_update_time
+            should_update = False
             async with work_lock:
-                completed_work_units += 1
+                channels_processed += 1
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_update_time >= UPDATE_INTERVAL:
+                    last_update_time = current_time
+                    should_update = True
+            
+            # Call update outside of the lock to avoid deadlock
+            if should_update:
+                await update_progress_display()
         
         async def update_progress_display():
-            progress_percent = int((completed_work_units / total_work_units) * 100) if total_work_units > 0 else 0
+            nonlocal channels_processed
+            # Read values while holding the lock
+            async with work_lock:
+                progress_percent = int((channels_processed / total_channels_to_process) * 100) if total_channels_to_process > 0 else 0
+                # Cap progress at 100% to avoid confusion
+                progress_percent = min(progress_percent, 100)
+                current_completed = completed_users
+                current_processed = channels_processed
+            
+            # Update embed fields without holding the lock
             loading_embed.set_field_at(0, name="Overall Progress", 
                                      value=f"{progress_percent}%", 
                                      inline=True)
             loading_embed.set_field_at(1, name="Users Completed", 
-                                     value=f"{completed_users} / {total_users}", 
+                                     value=f"{current_completed} / {total_users}", 
+                                     inline=True)
+            loading_embed.set_field_at(2, name="Channels Processed",
+                                     value=f"{current_processed} / {total_channels_to_process}",
                                      inline=True)
             try:
                 await loading_msg.edit(embed=loading_embed)
             except:
                 pass
         
-        # Process users in parallel batches
+        # Process users one at a time
         async def process_user(member):
             """Process a single user and return their count"""
             nonlocal completed_users
@@ -293,9 +332,8 @@ class Leaderboard(commands.Cog):
             async with work_lock:
                 completed_users += 1
                 
-            # Update display periodically (every 5 users)
-            if completed_users % 5 == 0:
-                await update_progress_display()
+            # Update display after each user completes
+            await update_progress_display()
                 
             if count > 0:
                 return (str(member.id), count)
@@ -303,31 +341,22 @@ class Leaderboard(commands.Cog):
         
         # Get message counts for all members
         message_counts = []
-        user_batch_size = 50  # Process 50 users at a time
         
-        for i in range(0, total_users, user_batch_size):
-            batch = members[i:i + user_batch_size]
-            
-            # Update which batch is being processed
-            loading_embed.set_field_at(2, name="Processing", 
-                                     value=f"Batch {i//user_batch_size + 1} of {(total_users + user_batch_size - 1)//user_batch_size} ({len(batch)} users)", 
+        # Process one user at a time
+        for i, member in enumerate(members):
+            # Update which user is being processed
+            loading_embed.set_field_at(3, name="Processing", 
+                                     value=f"User {i + 1} of {total_users}: {member.display_name}", 
                                      inline=True)
             try:
                 await loading_msg.edit(embed=loading_embed)
             except:
                 pass
             
-            # Process users in parallel
-            tasks = [process_user(member) for member in batch]
-            results = await asyncio.gather(*tasks)
-            
-            # Add non-None results
-            for result in results:
-                if result:
-                    message_counts.append(result)
-            
-            # Update progress after batch
-            await update_progress_display()
+            # Process single user
+            result = await process_user(member)
+            if result:
+                message_counts.append(result)
         
         # Update to show we're finalizing
         try:
@@ -335,6 +364,7 @@ class Leaderboard(commands.Cog):
             loading_embed.description = "All users processed! Preparing final leaderboard..."
             loading_embed.add_field(name="Status", value="✅ Sorting results...", inline=False)
             loading_embed.add_field(name="Users Processed", value=f"{total_users} users", inline=True)
+            loading_embed.add_field(name="Total Channels Processed", value=f"{channels_processed} channels", inline=True)
             loading_embed.add_field(name="Users with Messages", value=f"{len(message_counts)} users", inline=True)
             await loading_msg.edit(embed=loading_embed)
         except:
