@@ -44,9 +44,9 @@ class LeaderboardView(discord.ui.View):
 
         embed.add_field(
             name="Rankings",
-            value="\n".join(leaderboard_text)
-            if leaderboard_text
-            else "No data available",
+            value=(
+                "\n".join(leaderboard_text) if leaderboard_text else "No data available"
+            ),
             inline=False,
         )
 
