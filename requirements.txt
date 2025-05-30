@@ -6,3 +6,4 @@ pandas==2.2.3
 Pillow==11.2.1
 protobuf==6.31.1
 python-dotenv==1.1.0
+black==24.2.0
