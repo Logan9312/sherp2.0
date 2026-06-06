@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import json
 from dotenv import load_dotenv
@@ -43,6 +44,38 @@ with open("data/commands.json", "r", encoding="utf-8") as f:
     cmds = json.load(f)
 with open("data/copypasta.json", "r", encoding="utf-8") as f:
     pastas = json.load(f)
+
+
+def slash_command_description(command_name: str) -> str:
+    return f"Run the {command_name} command."
+
+
+def make_trivial_slash_command(command_name: str, response: str):
+    async def callback(interaction: discord.Interaction):
+        await interaction.response.send_message(response)
+
+    callback.__name__ = f"slash_{command_name.replace('-', '_')}"
+    return app_commands.Command(
+        name=command_name,
+        description=slash_command_description(command_name),
+        callback=callback,
+    )
+
+
+for command, response in cmds.items():
+    if not command.startswith("?"):
+        continue
+    client.tree.add_command(
+        make_trivial_slash_command(command[1:], response),
+        guilds=GUILDS,
+    )
+
+
+@client.tree.command(
+    name="pasta", description="Send a random copypasta.", guilds=GUILDS
+)
+async def pasta_slash(interaction: discord.Interaction):
+    await interaction.response.send_message(random.choice(pastas))
 
 
 # A command is trivial if its response is static string. These commands can

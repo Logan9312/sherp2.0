@@ -39,7 +39,9 @@ class Snipe(commands.Cog):
             buf.seek(0)
             return attachment.filename, buf
 
-    @commands.command(name="snipe")
+    @commands.hybrid_command(
+        name="snipe", description="Show recently deleted messages."
+    )
     async def snipe(self, ctx):
         msgs = None
         async with self.__lock:

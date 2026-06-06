@@ -466,6 +466,22 @@ class Leaderboard(commands.Cog):
         """Slash command to display the message count leaderboard"""
         await self.show_leaderboard(interaction, interaction.guild, interaction.channel)
 
+    @app_commands.command(
+        name="lb",
+        description="Display the message count leaderboard for this server",
+    )
+    async def leaderboard_lb_slash(self, interaction: discord.Interaction):
+        """Slash alias for leaderboard"""
+        await self.show_leaderboard(interaction, interaction.guild, interaction.channel)
+
+    @app_commands.command(
+        name="top",
+        description="Display the message count leaderboard for this server",
+    )
+    async def leaderboard_top_slash(self, interaction: discord.Interaction):
+        """Slash alias for leaderboard"""
+        await self.show_leaderboard(interaction, interaction.guild, interaction.channel)
+
     # Common method for both prefix and slash commands
     async def show_leaderboard(
         self, ctx_or_interaction, guild: discord.Guild, channel: discord.TextChannel
@@ -521,6 +537,38 @@ class Leaderboard(commands.Cog):
         self, interaction: discord.Interaction, member: Optional[discord.Member] = None
     ):
         """Slash command to check message count"""
+        if member is None:
+            member = interaction.user
+
+        await self.show_message_count(interaction, interaction.guild, member)
+
+    @app_commands.command(
+        name="mc",
+        description="Check message count for yourself or another member",
+    )
+    @app_commands.describe(
+        member="The member to check message count for (defaults to yourself)"
+    )
+    async def message_count_mc_slash(
+        self, interaction: discord.Interaction, member: Optional[discord.Member] = None
+    ):
+        """Slash alias for message count"""
+        if member is None:
+            member = interaction.user
+
+        await self.show_message_count(interaction, interaction.guild, member)
+
+    @app_commands.command(
+        name="mycount",
+        description="Check message count for yourself or another member",
+    )
+    @app_commands.describe(
+        member="The member to check message count for (defaults to yourself)"
+    )
+    async def message_count_mycount_slash(
+        self, interaction: discord.Interaction, member: Optional[discord.Member] = None
+    ):
+        """Slash alias for message count"""
         if member is None:
             member = interaction.user
 
