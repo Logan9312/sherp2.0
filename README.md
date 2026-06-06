@@ -1,5 +1,7 @@
 # sherp2.0
 
+> **Note:** This repo is a fork/copy of the original Sherpbot repo at [Sooraj-beep/sherp2.0](https://github.com/Sooraj-beep/sherp2.0).
+
 sherp2.0 is a discord bot that answers frequently asked questions for students at the University of Alberta. It is currently operable on the unofficial University of Alberta CS discord server. Students can contribute to the bots knowledge database by contributing to `data`
 
 ## Features
