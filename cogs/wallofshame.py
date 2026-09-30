@@ -4,7 +4,7 @@ import discord
 
 from helper import get_config
 
-from .helpers.leaderboard_store import LeaderboardStore
+from .helpers.board_store import BoardStore
 from .message_board import MessageBoard
 
 __DEFAULT_CHANNEL_ID = 1519463378903629824
@@ -29,20 +29,18 @@ WALL_OF_SHAME_BAN_THRESHOLD = (
 
 class WallOfShame(MessageBoard):
     board_name = "wall-of-shame"
-    leaderboard_key = "ban"
+    storage_key = "ban"
 
-    def __init__(
-        self, bot: discord.Client, leaderboard: Optional[LeaderboardStore] = None
-    ):
+    def __init__(self, bot: discord.Client, store: Optional[BoardStore] = None):
         super().__init__(
             bot,
             channel_id=WALL_OF_SHAME_CHANNEL_ID,
             primary_emoji_str=WALL_OF_SHAME_BAN_EMOJI_STR,
             primary_threshold=WALL_OF_SHAME_BAN_THRESHOLD,
             embed_color=discord.Color.dark_red(),
-            leaderboard=leaderboard,
+            store=store,
         )
 
 
-async def setup_wall_of_shame(bot, guilds, leaderboard=None):
-    await bot.add_cog(WallOfShame(bot, leaderboard), guilds=guilds)
+async def setup_wall_of_shame(bot, guilds, store=None):
+    await bot.add_cog(WallOfShame(bot, store), guilds=guilds)

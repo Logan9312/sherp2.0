@@ -9,12 +9,11 @@ import discord
 import pytest
 
 from cogs import message_board as message_board_module
-from cogs.helpers.leaderboard_store import LeaderboardStore
+from cogs.helpers.board_store import BoardStore, open_board_store
 from cogs.leaderboard import (
     ONPHONE_BOARD,
     WALL_OF_SHAME_BOARD,
     Leaderboard,
-    open_leaderboard_store,
     position_window,
     rank_scores,
     setup_leaderboard,
@@ -36,17 +35,20 @@ class FakeChannel:
         self._nsfw = nsfw
         self.id = channel_id
         self.send = AsyncMock()
+        self.fetch_message = AsyncMock()
 
     def is_nsfw(self):
         return self._nsfw
 
 
 class FakeBot:
-    def __init__(self, users=None):
+    def __init__(self, users=None, channels=None, cached_messages=None):
         self._users = users or {}
+        self._channels = channels or {}
+        self.cached_messages = cached_messages or []
 
-    def get_channel(self, _channel_id):
-        return SimpleNamespace()
+    def get_channel(self, channel_id):
+        return self._channels.get(channel_id, SimpleNamespace())
 
     def get_emoji(self, _emoji_id):
         return None
@@ -55,12 +57,12 @@ class FakeBot:
         return self._users.get(user_id)
 
 
-def make_bot(users=None) -> discord.Client:
-    return cast(discord.Client, FakeBot(users))
+def make_bot(users=None, channels=None, cached_messages=None) -> discord.Client:
+    return cast(discord.Client, FakeBot(users, channels, cached_messages))
 
 
-def make_store() -> LeaderboardStore:
-    return LeaderboardStore(":memory:")
+def make_store() -> BoardStore:
+    return BoardStore(":memory:")
 
 
 def make_user(user_id, bot=False) -> discord.User:
@@ -108,22 +110,55 @@ def react_all(store, user_ids, board="onphone", message_id=MESSAGE_ID):
         store.add_reaction(board, GUILD_ID, message_id, AUTHOR_ID, user_id)
 
 
-def make_board_with_channel(board_cls, store):
-    board = board_cls(make_bot(), leaderboard=store)
+def make_board_channel(board_cls):
+    board_post = SimpleNamespace(
+        id=789, add_reaction=AsyncMock(), edit=AsyncMock(), delete=AsyncMock()
+    )
+    return SimpleNamespace(
+        id=board_cls(make_bot()).board_channel_id,
+        send=AsyncMock(return_value=board_post),
+        fetch_message=AsyncMock(return_value=board_post),
+    )
+
+
+def make_board_with_channel(board_cls, store, board_channel=None, bot=None):
+    board = board_cls(bot or make_bot(), store=store)
     board._build_embeds = AsyncMock(return_value=[])
     board._get_open_msg_view = AsyncMock(return_value=SimpleNamespace())
-    board_post = SimpleNamespace(id=789, add_reaction=AsyncMock(), edit=AsyncMock())
-    board.board_channel = cast(
-        Any,
-        SimpleNamespace(
-            send=AsyncMock(return_value=board_post),
-            fetch_message=AsyncMock(return_value=board_post),
-        ),
-    )
+    board.board_channel = cast(Any, board_channel or make_board_channel(board_cls))
     return board
 
 
-# LeaderboardStore
+def make_payload(
+    user_id=201,
+    emoji=ONPHONE,
+    message_id=MESSAGE_ID,
+    channel_id=456,
+    guild_id: int | None = GUILD_ID,
+    added=True,
+) -> Any:
+    # A raw reaction event. Discord only includes the member on additions.
+    return SimpleNamespace(
+        message_id=message_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        emoji=emoji,
+        member=SimpleNamespace(id=user_id, bot=False) if added else None,
+    )
+
+
+def make_uncached_message(count, emoji=ONPHONE, message_id=MESSAGE_ID):
+    # A message that isn't in discord.py's cache and has to be fetched.
+    channel = FakeChannel()
+    msg = make_message(message_id=message_id, channel=channel)
+    if count:
+        msg.reactions = [SimpleNamespace(emoji=emoji, count=count, message=msg)]
+    channel.fetch_message = AsyncMock(return_value=msg)
+    return msg
+
+
+# BoardStore
 
 
 def test_reaction_costs_one_point_and_removing_it_refunds():
@@ -275,17 +310,35 @@ def test_boards_and_guilds_are_scored_separately():
     assert scores(store, "onphone", guild_id=2) == {203: -1}
 
 
-def test_scores_persist_across_reopening(tmp_path):
-    path = str(tmp_path / "nested" / "leaderboard.db")
-    store = LeaderboardStore(path)
+def test_store_persists_across_reopening(tmp_path):
+    path = str(tmp_path / "nested" / "boards.db")
+    store = BoardStore(path)
     react_all(store, [201, 202, 203])
     store.mark_boarded("onphone", GUILD_ID, MESSAGE_ID, AUTHOR_ID)
+    store.save_board_post("onphone", MESSAGE_ID, 789, 555, ONPHONE)
     store.close()
 
-    reopened = LeaderboardStore(path)
+    reopened = BoardStore(path)
 
     assert scores(reopened) == {201: 1, 202: 1, 203: 1, AUTHOR_ID: 3}
     assert not reopened.mark_boarded("onphone", GUILD_ID, MESSAGE_ID, AUTHOR_ID)
+    assert reopened.get_board_post("onphone", MESSAGE_ID) == (789, 555, ONPHONE)
+
+
+def test_board_posts_are_saved_replaced_and_deleted_per_board():
+    store = make_store()
+
+    store.save_board_post("onphone", MESSAGE_ID, 789, 555, ONPHONE)
+    store.save_board_post("onphone", MESSAGE_ID, 790, 556, "👍")
+    store.save_board_post("ban", MESSAGE_ID, 791, 557, BAN)
+
+    assert store.get_board_post("onphone", MESSAGE_ID) == (790, 556, "👍")
+    assert store.get_board_post("ban", MESSAGE_ID) == (791, 557, BAN)
+
+    store.delete_board_post("onphone", MESSAGE_ID)
+
+    assert store.get_board_post("onphone", MESSAGE_ID) is None
+    assert store.get_board_post("ban", MESSAGE_ID) == (791, 557, BAN)
 
 
 def test_get_scores_orders_highest_first():
@@ -353,7 +406,7 @@ def test_position_window_is_cut_off_at_the_top_and_bottom():
 
 def test_onphone_reaction_is_scored_by_starboard():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
 
     asyncio.run(starboard.on_reaction_add(make_reaction(1), make_user(201)))
 
@@ -362,17 +415,16 @@ def test_onphone_reaction_is_scored_by_starboard():
 
 def test_removing_onphone_reaction_refunds_via_starboard():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
     msg = make_message()
+    starboard = Starboard(make_bot(cached_messages=[msg]), store=store)
 
     asyncio.run(
         starboard.on_reaction_add(make_reaction(1, message=msg), make_user(201))
     )
-    asyncio.run(
-        starboard.on_reaction_remove(make_reaction(0, message=msg), make_user(201))
-    )
+    asyncio.run(starboard.on_raw_reaction_remove(make_payload(201, added=False)))
 
     assert scores(store) == {201: 0}
+    msg.channel.send.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -389,7 +441,7 @@ def test_removing_onphone_reaction_refunds_via_starboard():
 )
 def test_starboard_ignores_unscored_reactions(reaction, user):
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
 
     asyncio.run(starboard.on_reaction_add(reaction, user or make_user(201)))
 
@@ -398,7 +450,7 @@ def test_starboard_ignores_unscored_reactions(reaction, user):
 
 def test_starboard_ignores_reactions_in_board_channel():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     msg = make_message(channel=FakeChannel(channel_id=starboard.board_channel_id))
 
     asyncio.run(
@@ -433,7 +485,7 @@ def test_reaching_starboard_rewards_backers_and_author():
 
 def test_fallback_board_post_also_rewards():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     starboard._build_embeds = AsyncMock(return_value=[])
     starboard._get_open_msg_view = AsyncMock(return_value=SimpleNamespace())
     starboard.board_channel = cast(
@@ -454,7 +506,7 @@ def test_fallback_board_post_also_rewards():
 
 def test_failed_board_post_rewards_nothing():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     starboard._build_embeds = AsyncMock(return_value=[])
     starboard._get_open_msg_view = AsyncMock(return_value=SimpleNamespace())
     starboard.board_channel = cast(
@@ -509,20 +561,24 @@ def test_wall_of_shame_scores_ban_reactions_on_its_own_leaderboard():
 
 def test_deleting_pending_message_refunds_via_board():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     msg = make_message()
     asyncio.run(
         starboard.on_reaction_add(make_reaction(1, message=msg), make_user(201))
     )
 
-    asyncio.run(starboard.on_message_delete(cast(discord.Message, msg)))
+    asyncio.run(
+        starboard.on_raw_message_delete(
+            cast(Any, SimpleNamespace(message_id=MESSAGE_ID))
+        )
+    )
 
     assert scores(store) == {201: 0}
 
 
 def test_bulk_deleting_messages_refunds_pending_reactors():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     first = make_message(message_id=1)
     second = make_message(message_id=2)
     asyncio.run(
@@ -533,7 +589,9 @@ def test_bulk_deleting_messages_refunds_pending_reactors():
     )
 
     asyncio.run(
-        starboard.on_bulk_message_delete(cast(list[discord.Message], [first, second]))
+        starboard.on_raw_bulk_message_delete(
+            cast(Any, SimpleNamespace(message_ids={1, 2}))
+        )
     )
 
     assert scores(store) == {201: 0, 202: 0}
@@ -541,7 +599,7 @@ def test_bulk_deleting_messages_refunds_pending_reactors():
 
 def test_clearing_reactions_refunds_via_board():
     store = make_store()
-    starboard = Starboard(make_bot(), leaderboard=store)
+    starboard = Starboard(make_bot(), store=store)
     msg = make_message()
     asyncio.run(
         starboard.on_reaction_add(make_reaction(1, message=msg), make_user(201))
@@ -550,26 +608,34 @@ def test_clearing_reactions_refunds_via_board():
         starboard.on_reaction_add(make_reaction(1, message=msg), make_user(202))
     )
 
-    asyncio.run(starboard.on_reaction_clear_emoji(make_reaction(0, "👍", msg)))
+    def clear_emoji(emoji):
+        return cast(Any, SimpleNamespace(message_id=MESSAGE_ID, emoji=emoji))
+
+    asyncio.run(starboard.on_raw_reaction_clear_emoji(clear_emoji("👍")))
     assert scores(store) == {201: -1, 202: -1}
 
-    asyncio.run(starboard.on_reaction_clear_emoji(make_reaction(0, message=msg)))
+    asyncio.run(starboard.on_raw_reaction_clear_emoji(clear_emoji(ONPHONE)))
     assert scores(store) == {201: 0, 202: 0}
 
     asyncio.run(
         starboard.on_reaction_add(make_reaction(1, message=msg), make_user(201))
     )
-    asyncio.run(starboard.on_reaction_clear(cast(discord.Message, msg), []))
+    asyncio.run(
+        starboard.on_raw_reaction_clear(
+            cast(Any, SimpleNamespace(message_id=MESSAGE_ID))
+        )
+    )
     assert scores(store) == {201: 0, 202: 0}
 
 
-def test_leaderboard_database_errors_do_not_block_board(caplog):
+def test_database_errors_do_not_block_board(caplog):
     class BrokenStore:
-        def add_reaction(self, *_args):
-            raise sqlite3.OperationalError("database is locked")
+        def __getattr__(self, name):
+            def fail(*_args):
+                raise sqlite3.OperationalError("database is locked")
 
-        def mark_boarded(self, *_args):
-            raise sqlite3.OperationalError("database is locked")
+            fail.__name__ = name
+            return fail
 
     starboard = make_board_with_channel(Starboard, cast(Any, BrokenStore()))
 
@@ -577,8 +643,162 @@ def test_leaderboard_database_errors_do_not_block_board(caplog):
         asyncio.run(starboard.on_reaction_add(make_reaction(3), make_user(201)))
 
     starboard.board_channel.send.assert_awaited_once()
-    assert "Failed to update starboard leaderboard via add_reaction" in caplog.text
-    assert "Failed to update starboard leaderboard via mark_boarded" in caplog.text
+    assert "Failed to update starboard store via add_reaction" in caplog.text
+    assert "Failed to update starboard store via save_board_post" in caplog.text
+    assert "Failed to update starboard store via mark_boarded" in caplog.text
+
+
+# Messages outside discord.py's message cache (e.g. after a restart)
+
+
+def test_reaction_on_uncached_message_is_fetched_and_scored():
+    store = make_store()
+    msg = make_uncached_message(1)
+    starboard = Starboard(make_bot(channels={456: msg.channel}), store=store)
+
+    asyncio.run(starboard.on_raw_reaction_add(make_payload(201)))
+
+    msg.channel.fetch_message.assert_awaited_once_with(MESSAGE_ID)
+    assert scores(store) == {201: -1}
+
+
+def test_reaction_on_cached_message_is_left_to_on_reaction_add():
+    store = make_store()
+    msg = make_uncached_message(1)
+    bot = make_bot(channels={456: msg.channel}, cached_messages=[msg])
+    starboard = Starboard(bot, store=store)
+
+    asyncio.run(starboard.on_raw_reaction_add(make_payload(201)))
+
+    msg.channel.fetch_message.assert_not_called()
+    assert scores(store) == {}
+
+
+def test_uncached_message_reaching_threshold_is_posted_and_rewarded():
+    store = make_store()
+    react_all(store, [201, 202])
+    msg = make_uncached_message(3)
+    starboard = make_board_with_channel(
+        Starboard, store, bot=make_bot(channels={456: msg.channel})
+    )
+
+    asyncio.run(starboard.on_raw_reaction_add(make_payload(203)))
+
+    starboard.board_channel.send.assert_awaited_once()
+    assert scores(store) == {201: 1, 202: 1, 203: 1, AUTHOR_ID: 3}
+    assert store.get_board_post("onphone", MESSAGE_ID) == (
+        789,
+        starboard.board_channel_id,
+        ONPHONE,
+    )
+
+
+def test_board_post_is_updated_not_reposted_after_restart():
+    store = make_store()
+    board_channel = make_board_channel(Starboard)
+    before_restart = make_board_with_channel(Starboard, store, board_channel)
+    cached_msg = make_message()
+    for count, user_id in enumerate([201, 202, 203], start=1):
+        asyncio.run(
+            before_restart.on_reaction_add(
+                make_reaction(count, message=cached_msg), make_user(user_id)
+            )
+        )
+    board_channel.send.assert_awaited_once()
+
+    msg = make_uncached_message(4)
+    bot = make_bot(channels={456: msg.channel, board_channel.id: board_channel})
+    after_restart = make_board_with_channel(Starboard, store, board_channel, bot=bot)
+
+    asyncio.run(after_restart.on_raw_reaction_add(make_payload(204)))
+
+    board_channel.send.assert_awaited_once()
+    board_post = board_channel.fetch_message.return_value
+    board_post.edit.assert_awaited_once_with(content=f"{ONPHONE} x **4** |#general")
+    assert scores(store) == {201: 1, 202: 1, 203: 1, AUTHOR_ID: 4}
+
+
+def test_unreacting_to_uncached_message_refunds_without_fetching():
+    store = make_store()
+    react_all(store, [201])
+    msg = make_uncached_message(0)
+    starboard = Starboard(make_bot(channels={456: msg.channel}), store=store)
+
+    asyncio.run(starboard.on_raw_reaction_remove(make_payload(201, added=False)))
+
+    assert scores(store) == {201: 0}
+    msg.channel.fetch_message.assert_not_called()
+
+
+def test_uncached_board_post_is_deleted_when_reactions_drop_after_restart():
+    store = make_store()
+    board_channel = make_board_channel(Starboard)
+    store.save_board_post("onphone", MESSAGE_ID, 789, board_channel.id, ONPHONE)
+    msg = make_uncached_message(2)
+    bot = make_bot(channels={456: msg.channel, board_channel.id: board_channel})
+    starboard = make_board_with_channel(Starboard, store, board_channel, bot=bot)
+
+    asyncio.run(starboard.on_raw_reaction_remove(make_payload(201, added=False)))
+
+    board_channel.fetch_message.return_value.delete.assert_awaited_once()
+    assert store.get_board_post("onphone", MESSAGE_ID) is None
+    assert starboard.board_msgs == {}
+
+
+def test_deleting_uncached_message_deletes_its_board_post_after_restart():
+    store = make_store()
+    board_channel = make_board_channel(Starboard)
+    store.save_board_post("onphone", MESSAGE_ID, 789, board_channel.id, ONPHONE)
+    bot = make_bot(channels={board_channel.id: board_channel})
+    starboard = make_board_with_channel(Starboard, store, board_channel, bot=bot)
+
+    asyncio.run(
+        starboard.on_raw_message_delete(
+            cast(Any, SimpleNamespace(message_id=MESSAGE_ID))
+        )
+    )
+
+    board_channel.fetch_message.return_value.delete.assert_awaited_once()
+    assert store.get_board_post("onphone", MESSAGE_ID) is None
+
+
+def test_reactions_in_board_channel_are_not_fetched():
+    store = make_store()
+    msg = make_uncached_message(3)
+    starboard = Starboard(make_bot(channels={456: msg.channel}), store=store)
+
+    asyncio.run(
+        starboard.on_raw_reaction_add(
+            make_payload(201, channel_id=starboard.board_channel_id)
+        )
+    )
+
+    msg.channel.fetch_message.assert_not_called()
+
+
+def test_board_without_store_ignores_uncached_messages():
+    msg = make_uncached_message(3)
+    starboard = Starboard(make_bot(channels={456: msg.channel}))
+
+    asyncio.run(starboard.on_raw_reaction_add(make_payload(201)))
+
+    msg.channel.fetch_message.assert_not_called()
+
+
+def test_uncached_reaction_on_message_deleted_before_fetch_is_skipped(caplog):
+    store = make_store()
+    channel = FakeChannel()
+    response = SimpleNamespace(status=404, reason="Not Found")
+    channel.fetch_message = AsyncMock(
+        side_effect=discord.NotFound(cast(Any, response), "Unknown Message")
+    )
+    starboard = Starboard(make_bot(channels={456: channel}), store=store)
+
+    with caplog.at_level(logging.WARNING, logger=message_board_module.logger.name):
+        asyncio.run(starboard.on_raw_reaction_add(make_payload(201)))
+
+    assert scores(store) == {}
+    assert "Failed to fetch starboard source message" in caplog.text
 
 
 # Commands
@@ -786,7 +1006,7 @@ def test_leaderboard_is_not_loaded_without_a_database(tmp_path):
     not_a_directory = tmp_path / "file"
     not_a_directory.write_text("")
 
-    store = open_leaderboard_store(str(not_a_directory / "leaderboard.db"))
+    store = open_board_store(str(not_a_directory / "boards.db"))
 
     assert store is None
     with pytest.raises(RuntimeError):

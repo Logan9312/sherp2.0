@@ -1,5 +1,3 @@
-import logging
-import sqlite3
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -7,20 +5,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helper import get_config
-
-from .helpers.leaderboard_store import BACKER_REWARD, REACTION_COST, LeaderboardStore
+from .helpers.board_store import BACKER_REWARD, REACTION_COST, BoardStore
 from .starboard import STARBOARD_ONPHONE_EMOJI_STR, Starboard
 from .wallofshame import WALL_OF_SHAME_BAN_EMOJI_STR, WallOfShame
-
-logger = logging.getLogger(__name__)
-
-__DEFAULT_DB_PATH = "db/leaderboard.db"
-
-__cfg = get_config().get("leaderboard", None)
-LEADERBOARD_DB_PATH = (
-    __cfg.get("db_path", __DEFAULT_DB_PATH) if __cfg else __DEFAULT_DB_PATH
-)
 
 TOP_COUNT = 10
 POSITION_RADIUS = 5
@@ -35,7 +22,7 @@ WOS_POSITION_HELP = "Privately show your place on the wall of shame leaderboard.
 
 @dataclass(frozen=True)
 class BoardInfo:
-    key: str  # The ``leaderboard_key`` of the board that scores it.
+    key: str  # The ``storage_key`` of the board that scores it.
     title: str
     emoji: str
     board_label: str
@@ -44,7 +31,7 @@ class BoardInfo:
 
 
 ONPHONE_BOARD = BoardInfo(
-    key=Starboard.leaderboard_key,
+    key=Starboard.storage_key,
     title="OnPhone Leaderboard",
     emoji=STARBOARD_ONPHONE_EMOJI_STR,
     board_label="starboard",
@@ -52,7 +39,7 @@ ONPHONE_BOARD = BoardInfo(
     color=discord.Color.dark_green(),
 )
 WALL_OF_SHAME_BOARD = BoardInfo(
-    key=WallOfShame.leaderboard_key,
+    key=WallOfShame.storage_key,
     title="Wall of Shame Leaderboard",
     emoji=WALL_OF_SHAME_BAN_EMOJI_STR,
     board_label="wall of shame",
@@ -102,7 +89,7 @@ def format_points(score: int) -> str:
 
 
 class Leaderboard(commands.Cog):
-    def __init__(self, bot, store: LeaderboardStore):
+    def __init__(self, bot, store: BoardStore):
         self.bot = bot
         self.store = store
 
@@ -244,19 +231,7 @@ class Leaderboard(commands.Cog):
         await self._send_position(ctx, WALL_OF_SHAME_BOARD)
 
 
-def open_leaderboard_store(
-    path: str = LEADERBOARD_DB_PATH,
-) -> Optional[LeaderboardStore]:
-    try:
-        return LeaderboardStore(path)
-    except (OSError, sqlite3.Error):
-        logger.exception("Failed to open leaderboard database path=%s", path)
-        return None
-
-
-async def setup_leaderboard(bot, guilds, store: Optional[LeaderboardStore]):
+async def setup_leaderboard(bot, guilds, store: Optional[BoardStore]):
     if store is None:
-        raise RuntimeError(
-            f"Leaderboard database could not be opened at {LEADERBOARD_DB_PATH}"
-        )
+        raise RuntimeError("Leaderboards need the board database, which failed to open")
     await bot.add_cog(Leaderboard(bot, store), guilds=guilds)

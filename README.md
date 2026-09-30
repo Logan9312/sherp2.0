@@ -30,7 +30,7 @@ Commands (use them as slash commands or with the `?` prefix):
 - `/leaderboard` / `/wosleaderboard`: top 10 of the OnPhone / wall of shame leaderboard, visible to everyone.
 - `/position` / `/wosposition`: your rank and the 5 members above and below you, visible only to you. The `?` prefix versions send the result by DM.
 
-Scores are stored in a SQLite file (`db/leaderboard.db` by default, set `db_path` under `[leaderboard]` in `bot_config.toml` to change it). When running in Docker, mount the `db/` directory on a volume (e.g. `-v sherp-db:/app/db`), otherwise the scores are lost when the container is recreated.
+Scores and the boards' posts are stored in a SQLite file (`db/boards.db` by default, set `db_path` under `[boards]` in `bot_config.toml` to change it), so both keep working for older messages after the bot restarts. When running in Docker, mount the `db/` directory on a volume (e.g. `-v sherp-db:/app/db`), otherwise they are lost when the container is recreated.
 
 ## Running the bot locally
 **Note:** If all you want to do is add new commands then you dont need to setup the bot, You can just clone the repo and contribute to `data/commands.json` or any of the other files in `data` folder. For more advanced changes, it is recommended to get a discord bot running locally to test functionality.

@@ -3,7 +3,7 @@ import discord
 
 from helper import get_config
 
-from .helpers.leaderboard_store import LeaderboardStore
+from .helpers.board_store import BoardStore
 from .message_board import MessageBoard
 
 __DEFAULT_CHANNEL_ID = 1133260871049691257
@@ -46,17 +46,15 @@ STARBOARD_EXCLUDED_EMOJIS = (
 
 class Starboard(MessageBoard):
     board_name = "starboard"
-    leaderboard_key = "onphone"
+    storage_key = "onphone"
 
-    def __init__(
-        self, bot: discord.Client, leaderboard: Optional[LeaderboardStore] = None
-    ):
+    def __init__(self, bot: discord.Client, store: Optional[BoardStore] = None):
         super().__init__(
             bot,
             channel_id=STARBOARD_CHANNEL_ID,
             primary_emoji_str=STARBOARD_ONPHONE_EMOJI_STR,
             primary_threshold=STARBOARD_ONPHONE_THRESHOLD,
-            leaderboard=leaderboard,
+            store=store,
         )
         self.other_threshold = STARBOARD_OTHER_THRESHOLD
         self.excluded_emojis = STARBOARD_EXCLUDED_EMOJIS
@@ -78,5 +76,5 @@ class Starboard(MessageBoard):
         return self.other_threshold
 
 
-async def setup_starboard(bot, guilds, leaderboard=None):
-    await bot.add_cog(Starboard(bot, leaderboard), guilds=guilds)
+async def setup_starboard(bot, guilds, store=None):
+    await bot.add_cog(Starboard(bot, store), guilds=guilds)

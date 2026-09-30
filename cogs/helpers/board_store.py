@@ -1,6 +1,16 @@
+import logging
 import os
 import sqlite3
 from typing import List, Optional, Tuple
+
+from helper import get_config
+
+logger = logging.getLogger(__name__)
+
+__DEFAULT_DB_PATH = "db/boards.db"
+
+__cfg = get_config().get("boards", None)
+BOARD_DB_PATH = __cfg.get("db_path", __DEFAULT_DB_PATH) if __cfg else __DEFAULT_DB_PATH
 
 # Points for reacting with a board's emoji. A reaction costs its reactor
 # REACTION_COST while the message is still waiting to reach the board. When
@@ -38,14 +48,25 @@ CREATE TABLE IF NOT EXISTS reactions (
     active INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (board, message_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS board_posts (
+    board TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    post_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (board, message_id)
+);
 """
 
 
-class LeaderboardStore:
-    # Persists leaderboard scores in SQLite. Every method runs synchronously in
+class BoardStore:
+    # Persists the reaction boards' state in SQLite: which messages have a
+    # board post (so a restarted bot edits its existing posts instead of
+    # reposting) and the leaderboard scores. Every method runs synchronously in
     # a single transaction, so calls made from the event loop never interleave.
     #
-    # ``board`` is a stable key per leaderboard (e.g. "onphone"). ``author_id``
+    # ``board`` is the board's stable storage key (e.g. "onphone"). ``author_id``
     # is ``None`` for authors that must not earn points (bots).
     #
     # A reaction row is deleted when a non-backer removes their reaction, so an
@@ -171,6 +192,35 @@ class LeaderboardStore:
                 (board, message_id),
             )
 
+    def save_board_post(
+        self, board: str, message_id: int, post_id: int, channel_id: int, emoji: str
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO board_posts "
+                "(board, message_id, post_id, channel_id, emoji) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (board, message_id, post_id, channel_id, emoji),
+            )
+
+    def get_board_post(
+        self, board: str, message_id: int
+    ) -> Optional[Tuple[int, int, str]]:
+        # Returns ``(post_id, channel_id, emoji)`` of the message's board post.
+        row = self._conn.execute(
+            "SELECT post_id, channel_id, emoji FROM board_posts "
+            "WHERE board = ? AND message_id = ?",
+            (board, message_id),
+        ).fetchone()
+        return None if row is None else (row[0], row[1], row[2])
+
+    def delete_board_post(self, board: str, message_id: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM board_posts WHERE board = ? AND message_id = ?",
+                (board, message_id),
+            )
+
     def get_scores(self, board: str, guild_id: int) -> List[Tuple[int, int]]:
         # Returns ``(user_id, score)`` pairs, highest score first.
         return self._conn.execute(
@@ -264,3 +314,11 @@ class LeaderboardStore:
             "DO UPDATE SET score = score + excluded.score",
             (board, guild_id, user_id, points),
         )
+
+
+def open_board_store(path: str = BOARD_DB_PATH) -> Optional[BoardStore]:
+    try:
+        return BoardStore(path)
+    except (OSError, sqlite3.Error):
+        logger.exception("Failed to open board database path=%s", path)
+        return None
