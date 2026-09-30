@@ -7,3 +7,4 @@ env/
 attachments/
 bot_config.toml
 sherp-service-account-key.json
+db/

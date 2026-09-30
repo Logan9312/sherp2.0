@@ -1,7 +1,10 @@
 import logging
-from typing import List, Optional, cast
+import sqlite3
+from typing import Any, Callable, List, Optional, cast
 import discord
 from discord.ext import commands
+
+from .helpers.leaderboard_store import LeaderboardStore
 
 logger = logging.getLogger(__name__)
 
@@ -9,14 +12,16 @@ PROPAGANDA_GIF_URL = "https://media1.tenor.com/m/zdkG7NnnREoAAAAd/propaganda.gif
 
 
 class MessageBoard(commands.Cog):
-
-    #To implement a new board, subclass this and pass the board's channel, primary emoji and threshold to ``__init__``.
-    #Override ``_get_threshold`` to change which emojis qualify and at what counts, return the threshold for a qualifying emoji.
-    #Use ``None`` for an emoji that can never repost a message to the board.
-    #Add the primary emoji of new board as a default excluded emoji into a list in starboard.py somewhere at the beginning.
-    #Add the new board to the bot in bot.py, and add a config section for it in bot_config.toml.
+    # To implement a new board, subclass this and pass the board's channel, primary emoji and threshold to ``__init__``.
+    # Override ``_get_threshold`` to change which emojis qualify and at what counts, return the threshold for a qualifying emoji.
+    # Use ``None`` for an emoji that can never repost a message to the board.
+    # Add the primary emoji of new board as a default excluded emoji into a list in starboard.py somewhere at the beginning.
+    # Add the new board to the bot in bot.py, and add a config section for it in bot_config.toml.
+    # To score the primary emoji on a leaderboard, set ``leaderboard_key`` to a stable storage key
+    # and pass a ``LeaderboardStore`` as ``leaderboard`` to ``__init__``.
 
     board_name = "message board"
+    leaderboard_key: Optional[str] = None
 
     def __init__(
         self,
@@ -26,6 +31,7 @@ class MessageBoard(commands.Cog):
         primary_emoji_str: str,
         primary_threshold: int,
         embed_color: discord.Color = discord.Color.dark_green(),
+        leaderboard: Optional[LeaderboardStore] = None,
     ):
         self.bot = bot
         self.primary_emoji_str = primary_emoji_str
@@ -34,6 +40,7 @@ class MessageBoard(commands.Cog):
         self.embed_color = embed_color
         self.board_msgs = dict()
         self.board_channel = bot.get_channel(self.board_channel_id)
+        self.leaderboard = leaderboard
 
     async def cog_load(self):
         await super().cog_load()
@@ -46,6 +53,95 @@ class MessageBoard(commands.Cog):
 
     def _get_channel_id(self, channel: object) -> Optional[int]:
         return getattr(channel, "id", None)
+
+    def _is_eligible_channel(self, channel) -> bool:
+        if channel.is_nsfw():
+            return False
+        return getattr(channel, "id", None) != self.board_channel_id
+
+    def _leaderboard_call(self, method: Callable[..., Any], *args: Any) -> None:
+        # Leaderboard failures are logged but must never stop the board itself.
+        try:
+            method(*args)
+        except sqlite3.Error:
+            logger.exception(
+                "Failed to update %s leaderboard via %s args=%s",
+                self.board_name,
+                getattr(method, "__name__", method),
+                args,
+            )
+
+    def _is_scored_emoji(self, emoji: object) -> bool:
+        return (
+            self.leaderboard is not None
+            and self.leaderboard_key is not None
+            and str(emoji) == self.primary_emoji_str
+        )
+
+    def _get_scored_author_id(self, msg: discord.Message) -> Optional[int]:
+        # Bots never earn author points on the leaderboard.
+        author = msg.author
+        return None if getattr(author, "bot", False) else author.id
+
+    def _record_reaction_add(self, react: discord.Reaction, user) -> None:
+        if not self._is_scored_emoji(react.emoji) or getattr(user, "bot", False):
+            return
+
+        msg = react.message
+        guild = getattr(msg, "guild", None)
+        if guild is None or user.id == msg.author.id:
+            return
+
+        store = cast(LeaderboardStore, self.leaderboard)
+        self._leaderboard_call(
+            store.add_reaction,
+            self.leaderboard_key,
+            guild.id,
+            msg.id,
+            self._get_scored_author_id(msg),
+            user.id,
+        )
+
+    def _record_reaction_remove(self, react: discord.Reaction, user) -> None:
+        if not self._is_scored_emoji(react.emoji) or getattr(user, "bot", False):
+            return
+
+        store = cast(LeaderboardStore, self.leaderboard)
+        self._leaderboard_call(
+            store.remove_reaction, self.leaderboard_key, react.message.id, user.id
+        )
+
+    def _record_reactions_cleared(self, message_id: int) -> None:
+        if self.leaderboard is None or self.leaderboard_key is None:
+            return
+
+        self._leaderboard_call(
+            self.leaderboard.clear_reactions, self.leaderboard_key, message_id
+        )
+
+    def _record_board_post(self, msg: discord.Message) -> None:
+        if self.leaderboard is None or self.leaderboard_key is None:
+            return
+
+        guild = getattr(msg, "guild", None)
+        if guild is None:
+            return
+
+        self._leaderboard_call(
+            self.leaderboard.mark_boarded,
+            self.leaderboard_key,
+            guild.id,
+            msg.id,
+            self._get_scored_author_id(msg),
+        )
+
+    def _record_message_deleted(self, message_id: int) -> None:
+        if self.leaderboard is None or self.leaderboard_key is None:
+            return
+
+        self._leaderboard_call(
+            self.leaderboard.forget_pending_message, self.leaderboard_key, message_id
+        )
 
     def _get_qualifying_reactions(
         self, msg: discord.Message, fallback_react: Optional[discord.Reaction] = None
@@ -206,6 +302,7 @@ class MessageBoard(commands.Cog):
             "emoji": str(react.emoji),
             "channel": channel,
         }
+        self._record_board_post(react.message)
         await self._try_add_board_reaction(msg, react.emoji)
 
     async def _handle_board_send_failure(
@@ -270,12 +367,13 @@ class MessageBoard(commands.Cog):
             await self._handle_board_send_failure(react, embeds, open_msg_view)
 
     @commands.Cog.listener()
-    async def on_reaction_add(self, react: discord.Reaction, _: discord.User):
-        if react.message.channel.is_nsfw():
+    async def on_reaction_add(
+        self, react: discord.Reaction, user: discord.User | discord.Member
+    ):
+        if not self._is_eligible_channel(react.message.channel):
             return
 
-        if getattr(react.message.channel, "id", None) == self.board_channel_id:
-            return
+        self._record_reaction_add(react, user)
 
         emoji = str(react.emoji)
         threshold = self._get_threshold(emoji)
@@ -288,12 +386,33 @@ class MessageBoard(commands.Cog):
             await self.create_board_post(react)
 
     @commands.Cog.listener()
-    async def on_reaction_remove(self, react: discord.Reaction, _: discord.User):
+    async def on_reaction_remove(
+        self, react: discord.Reaction, user: discord.User | discord.Member
+    ):
+        self._record_reaction_remove(react, user)
+
         if react.message.id not in self.board_msgs:
             return
 
         await self.update_reaction_count(react)
 
     @commands.Cog.listener()
+    async def on_reaction_clear(
+        self, msg: discord.Message, _: List[discord.Reaction]
+    ) -> None:
+        self._record_reactions_cleared(msg.id)
+
+    @commands.Cog.listener()
+    async def on_reaction_clear_emoji(self, react: discord.Reaction) -> None:
+        if self._is_scored_emoji(react.emoji):
+            self._record_reactions_cleared(react.message.id)
+
+    @commands.Cog.listener()
     async def on_message_delete(self, msg: discord.Message):
+        self._record_message_deleted(msg.id)
         await self.delete_board_post(msg.id)
+
+    @commands.Cog.listener()
+    async def on_bulk_message_delete(self, msgs: List[discord.Message]) -> None:
+        for msg in msgs:
+            self._record_message_deleted(msg.id)

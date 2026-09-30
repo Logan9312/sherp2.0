@@ -12,9 +12,25 @@ sherp2.0 is a discord bot that answers frequently asked questions for students a
 - Request Kattis problems based on difficulty and other parameters (credit: @GurveerSohal)
 - Slash Commands (credit: @DhanrajHira)
 - Starboard (credit: @ArtDynasty13)
+- OnPhone and Wall of Shame leaderboards (see [Leaderboards](#leaderboards))
 - Magic 8-ball
 - Shortcuts to many well known facts
 - Shortcuts to copypastas popular on the CS discord server
+
+## Leaderboards
+Sherp keeps two leaderboards: one for OnPhone reactions (starboard) and one for ban reactions (wall of shame). Everyone starts at 0 and both work the same way:
+- Reacting to a message with the board's emoji costs you 1 point. Removing the reaction before the message reaches the board refunds it.
+- When the message is posted to the board, everyone still reacting gets +2 (a net +1). Those points are kept even if they un-react later.
+- Reactions added once the message is already on the board are free and earn nothing.
+- Once the message has reached the board, its author gets 1 point for every reaction of that emoji on it, updated as reactions are added or removed (their own reaction doesn't count).
+- If a message is deleted before it reaches the board, everyone who reacted to it is refunded.
+- Bots, NSFW channels and the board channels themselves are ignored.
+
+Commands (use them as slash commands or with the `?` prefix):
+- `/leaderboard` / `/wosleaderboard`: top 10 of the OnPhone / wall of shame leaderboard, visible to everyone.
+- `/position` / `/wosposition`: your rank and the 5 members above and below you, visible only to you. The `?` prefix versions send the result by DM.
+
+Scores are stored in a SQLite file (`db/leaderboard.db` by default, set `db_path` under `[leaderboard]` in `bot_config.toml` to change it). When running in Docker, mount the `db/` directory on a volume (e.g. `-v sherp-db:/app/db`), otherwise the scores are lost when the container is recreated.
 
 ## Running the bot locally
 **Note:** If all you want to do is add new commands then you dont need to setup the bot, You can just clone the repo and contribute to `data/commands.json` or any of the other files in `data` folder. For more advanced changes, it is recommended to get a discord bot running locally to test functionality.
