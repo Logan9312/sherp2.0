@@ -523,25 +523,30 @@ class MessageBoard(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent):
-        stored = self._get_store()
-        if stored is None:
-            return
-
-        store, key = stored
         async with self._lock:
-            self._store_call(store.clear_reactions, key, payload.message_id)
+            stored = self._get_store()
+            if stored is not None:
+                store, key = stored
+                self._store_call(store.clear_reactions, key, payload.message_id)
+            await self.delete_board_post(payload.message_id)
 
     @commands.Cog.listener()
     async def on_raw_reaction_clear_emoji(
         self, payload: discord.RawReactionClearEmojiEvent
     ):
-        stored = self._get_store()
-        if stored is None or not self._is_scored_emoji(payload.emoji):
-            return
-
-        store, key = stored
         async with self._lock:
-            self._store_call(store.clear_reactions, key, payload.message_id)
+            stored = self._get_store()
+            if stored is not None and self._is_scored_emoji(payload.emoji):
+                store, key = stored
+                self._store_call(store.clear_reactions, key, payload.message_id)
+
+            if self._get_threshold(str(payload.emoji)) is None:
+                return
+            if self._get_board_record(payload.message_id) is None:
+                return
+            msg = await self._fetch_message(payload.channel_id, payload.message_id)
+            if msg is not None:
+                await self._refresh_board_post(msg, None)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
@@ -556,11 +561,10 @@ class MessageBoard(commands.Cog):
     async def on_raw_bulk_message_delete(
         self, payload: discord.RawBulkMessageDeleteEvent
     ):
-        stored = self._get_store()
-        if stored is None:
-            return
-
-        store, key = stored
         async with self._lock:
             for message_id in payload.message_ids:
-                self._store_call(store.forget_pending_message, key, message_id)
+                stored = self._get_store()
+                if stored is not None:
+                    store, key = stored
+                    self._store_call(store.forget_pending_message, key, message_id)
+                await self.delete_board_post(message_id)

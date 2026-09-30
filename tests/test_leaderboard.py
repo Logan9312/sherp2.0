@@ -804,6 +804,70 @@ def test_uncached_reaction_on_message_deleted_before_fetch_is_skipped(caplog):
 # Commands
 
 
+@pytest.mark.parametrize(
+    "board_cls, key, emoji",
+    [(Starboard, "onphone", ONPHONE), (WallOfShame, "ban", BAN)],
+)
+@pytest.mark.parametrize("event", ["clear", "clear_emoji", "bulk_delete"])
+def test_raw_clear_and_bulk_delete_remove_persisted_board_posts(
+    board_cls, key, emoji, event
+):
+    store = make_store()
+    board_channel = make_board_channel(board_cls)
+    store.add_reaction(key, GUILD_ID, MESSAGE_ID, AUTHOR_ID, 201)
+    store.mark_boarded(key, GUILD_ID, MESSAGE_ID, AUTHOR_ID)
+    store.save_board_post(key, MESSAGE_ID, 789, board_channel.id, emoji)
+    source = make_message()
+    source.channel.fetch_message.return_value = source
+    bot = make_bot(channels={456: source.channel, board_channel.id: board_channel})
+    board = make_board_with_channel(board_cls, store, board_channel, bot=bot)
+    payload = cast(
+        Any,
+        SimpleNamespace(
+            message_id=MESSAGE_ID, message_ids={MESSAGE_ID}, channel_id=456, emoji=emoji
+        ),
+    )
+
+    handler = {
+        "clear": board.on_raw_reaction_clear,
+        "clear_emoji": board.on_raw_reaction_clear_emoji,
+        "bulk_delete": board.on_raw_bulk_message_delete,
+    }[event]
+    asyncio.run(handler(payload))
+
+    board_channel.fetch_message.return_value.delete.assert_awaited_once()
+    assert store.get_board_post(key, MESSAGE_ID) is None
+    assert board.board_msgs == {}
+    assert dict(store.get_scores(key, GUILD_ID))[201] == 1
+    assert dict(store.get_scores(key, GUILD_ID))[AUTHOR_ID] == (
+        1 if event == "bulk_delete" else 0
+    )
+
+
+def test_clearing_other_qualifying_emoji_keeps_remaining_onphone_board_post():
+    store = make_store()
+    board_channel = make_board_channel(Starboard)
+    store.save_board_post("onphone", MESSAGE_ID, 789, board_channel.id, "👍")
+    react_all(store, [201, 202, 203])
+    store.mark_boarded("onphone", GUILD_ID, MESSAGE_ID, AUTHOR_ID)
+    source = make_uncached_message(3)
+    bot = make_bot(channels={456: source.channel, board_channel.id: board_channel})
+    board = make_board_with_channel(Starboard, store, board_channel, bot=bot)
+
+    asyncio.run(
+        board.on_raw_reaction_clear_emoji(
+            cast(
+                Any, SimpleNamespace(message_id=MESSAGE_ID, channel_id=456, emoji="👍")
+            )
+        )
+    )
+
+    post = board_channel.fetch_message.return_value
+    post.edit.assert_awaited_once_with(content=f"{ONPHONE} x **3** |#general")
+    post.delete.assert_not_awaited()
+    assert scores(store)[AUTHOR_ID] == 3
+
+
 class FakeGuild:
     def __init__(self, names):
         self.id = GUILD_ID
