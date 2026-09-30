@@ -185,6 +185,25 @@ def test_starboard_ignores_ban_emoji_at_any_count():
     starboard.update_reaction_count.assert_not_called()
 
 
+def test_board_embed_uses_default_avatar_when_author_has_none():
+    starboard = Starboard(make_bot())
+    default_avatar = "https://cdn.discordapp.com/embed/avatars/0.png"
+    msg = SimpleNamespace(
+        content="hello",
+        system_content="",
+        attachments=[],
+        author=SimpleNamespace(
+            display_name="author",
+            avatar=None,
+            display_avatar=SimpleNamespace(url=default_avatar),
+        ),
+    )
+
+    embed = starboard._get_board_embed(cast(discord.Message, msg))
+
+    assert embed.author.icon_url == default_avatar
+
+
 def test_starboard_title_includes_all_qualifying_reactions():
     starboard = Starboard(make_bot())
     reactions = [

@@ -314,7 +314,9 @@ class MessageBoard(commands.Cog):
         embed = discord.Embed(
             description=msg.content or msg.system_content,
             color=self.embed_color,
-        ).set_author(name=msg.author.display_name, icon_url=msg.author.avatar.url)
+        ).set_author(
+            name=msg.author.display_name, icon_url=msg.author.display_avatar.url
+        )
 
         if u := self._get_first_viable_attachment_url(msg.attachments):
             embed.set_image(url=u)
