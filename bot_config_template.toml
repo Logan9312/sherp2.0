@@ -30,3 +30,8 @@ channel=1519463378903629824                 # The channel ID where the bot shoul
                                             # wall-of-shame messages.
 ban_emoji="<:ban:939740396286791741>"       # The string representation of the Ban emoji.
 ban_threshold=3                             # Ban reactions needed to post to the wall-of-shame.
+
+[boards]
+db_path="db/boards.db"                      # SQLite file storing the starboard and wall-of-shame
+                                            # posts and leaderboard scores. Keep it on persistent
+                                            # storage so they survive restarts.
