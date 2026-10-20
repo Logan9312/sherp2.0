@@ -8,3 +8,5 @@ __pycache__/
 bot_config.toml
 sherp-service-account-key.json
 db/
+.env
+.env.*
