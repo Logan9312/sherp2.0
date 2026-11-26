@@ -10,8 +10,7 @@ WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
 COPY pyproject.toml uv.lock .python-version ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --no-install-project
 
 COPY . .
 
